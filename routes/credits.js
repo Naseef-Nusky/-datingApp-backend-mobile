@@ -6,6 +6,7 @@ import SystemSetting from '../models/SystemSetting.js';
 import { protect } from '../middleware/auth.js';
 import { getCreditSettings, DEFAULT_REFILL_PACKS } from '../utils/creditSettings.js';
 import { checkCanStartCall } from '../utils/callAccess.js';
+import { buildStripeCheckoutRedirectUrl } from '../utils/universalLinks.js';
 
 const STRIPE_PRICES_KEY = 'stripe.credit_pack_prices';
 const STRIPE_SUBSCRIPTION_PRICES_KEY = 'stripe.subscription_prices'; // recurring monthly
@@ -250,28 +251,16 @@ router.post('/refill-checkout-session', protect, async (req, res) => {
 
     const displayLabel = `${credits} Credits`;
     const priceId = await getOrCreateStripeRefillPrice(String(pack.id || packId), displayLabel, credits, amountCents);
-    const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
     const getSafeReturnPath = () => {
       if (typeof returnPath !== 'string' || !returnPath.startsWith('/')) {
         return '/dashboard';
       }
-      // Do not allow protocol-relative paths such as //evil-site.com
       if (returnPath.startsWith('//')) {
         return '/dashboard';
       }
       return returnPath;
     };
     const safeReturnPath = getSafeReturnPath();
-    // Stripe replaces {CHECKOUT_SESSION_ID} only when it appears literally in success_url
-    // (URL.searchParams encodes braces and breaks substitution).
-    const buildRedirectUrl = (status) => {
-      const path = safeReturnPath.startsWith('/') ? safeReturnPath : `/${safeReturnPath}`;
-      const joiner = path.includes('?') ? '&' : '?';
-      if (status === 'success') {
-        return `${frontendUrl}${path}${joiner}refill=success&session_id={CHECKOUT_SESSION_ID}`;
-      }
-      return `${frontendUrl}${path}${joiner}refill=cancelled`;
-    };
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       payment_method_types: ['card'],
@@ -281,8 +270,16 @@ router.post('/refill-checkout-session', protect, async (req, res) => {
           quantity: 1,
         },
       ],
-      success_url: buildRedirectUrl('success'),
-      cancel_url: buildRedirectUrl('cancelled'),
+      success_url: buildStripeCheckoutRedirectUrl(req, {
+        returnPath: safeReturnPath,
+        flow: 'refill',
+        status: 'success',
+      }),
+      cancel_url: buildStripeCheckoutRedirectUrl(req, {
+        returnPath: safeReturnPath,
+        flow: 'refill',
+        status: 'cancelled',
+      }),
       client_reference_id: String(req.user.id),
       metadata: {
         userId: String(req.user.id),
@@ -418,7 +415,6 @@ router.post('/create-checkout-session', protect, async (req, res) => {
     const credits = getCreditsForPlan(plan, packConfig);
     const displayLabel = packConfig?.creditsLabel?.trim() || `${credits} Credits/Mo`;
     const priceId = await getOrCreateStripeSubscriptionPrice(plan, displayLabel, credits, amountCents);
-    const frontendUrl = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
       payment_method_types: ['card'],
@@ -428,8 +424,16 @@ router.post('/create-checkout-session', protect, async (req, res) => {
           quantity: 1,
         },
       ],
-      success_url: `${frontendUrl}/dashboard?upgrade=success&session_id={CHECKOUT_SESSION_ID}`,
-      cancel_url: `${frontendUrl}/dashboard?upgrade=cancelled`,
+      success_url: buildStripeCheckoutRedirectUrl(req, {
+        returnPath: '/dashboard',
+        flow: 'upgrade',
+        status: 'success',
+      }),
+      cancel_url: buildStripeCheckoutRedirectUrl(req, {
+        returnPath: '/dashboard',
+        flow: 'upgrade',
+        status: 'cancelled',
+      }),
       client_reference_id: String(req.user.id),
       metadata: {
         userId: String(req.user.id),
