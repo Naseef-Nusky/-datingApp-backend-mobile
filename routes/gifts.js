@@ -99,7 +99,6 @@ router.post('/send', protect, async (req, res) => {
       if (!isStreamerSender) {
         if ((user.credits || 0) < creditCost) {
           return res.status(400).json({
-            code: 'INSUFFICIENT_CREDITS',
             message: 'Insufficient credits',
             required: creditCost,
             balance: user.credits || 0,
@@ -195,13 +194,7 @@ router.post('/send', protect, async (req, res) => {
         { model: GiftCatalog, as: 'giftItemData', attributes: ['id', 'name', 'imageUrl', 'creditCost'] },
       ],
     });
-    const payload = sent?.toJSON ? sent.toJSON() : sent;
-    if (creditCost > 0) {
-      const senderAfter = await User.findByPk(senderId, { attributes: ['credits'] });
-      payload.creditsUsed = creditCost;
-      payload.senderCreditsBalance = senderAfter?.credits ?? null;
-    }
-    res.status(201).json(payload);
+    res.status(201).json(sent);
   } catch (error) {
     console.error('Send gift error:', error);
     const isFk = error.name === 'SequelizeForeignKeyConstraintError';

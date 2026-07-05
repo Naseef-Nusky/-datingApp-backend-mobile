@@ -182,7 +182,6 @@ const User = sequelize.define(
         profileViews: true,
         dailyDigest: true,
         promotional: false,
-        mobileCompatibleMatches: true,
         digestFrequency: 'daily', // 'real-time', 'hourly', 'daily', 'weekly'
         digestTime: '09:00', // HH:mm format
       },
