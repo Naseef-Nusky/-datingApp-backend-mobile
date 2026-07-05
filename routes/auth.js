@@ -45,6 +45,20 @@ async function assertAllowRegistrations(res) {
   return false;
 }
 
+function isFullyRegisteredMember(user, profile) {
+  if (!user || user.registrationComplete === false) return false;
+  const photos = Array.isArray(profile?.photos) ? profile.photos : [];
+  const hasProfilePhoto = Boolean(photos[0]?.url);
+  const galleryCount = photos.slice(1).filter((p) => p?.url).length;
+  if (!hasProfilePhoto || galleryCount < 2) return false;
+  const hasLookingFor = Boolean(profile?.preferences?.lookingFor);
+  const hasBasicProfile =
+    Boolean(profile?.firstName) &&
+    Boolean(profile?.gender) &&
+    Number(profile?.age || 0) >= 18;
+  return hasBasicProfile && hasLookingFor;
+}
+
 // @route   GET /api/auth/site-status
 // @desc    Public status for maintenance screen (staff JWT bypasses appInMaintenance)
 // @access  Public
@@ -207,22 +221,90 @@ router.post(
 
       if (!(await assertAllowRegistrations(res))) return;
 
-      const { email, password, firstName, lastName, age, gender, lifestyle } = req.body;
+      const {
+        email,
+        password,
+        firstName,
+        lastName,
+        age,
+        gender,
+        lifestyle,
+        bio,
+        interests,
+        preferences,
+        location: bodyLocation,
+      } = req.body;
 
       // Normalize email to lowercase for case-insensitive check
       const normalizedEmail = email.toLowerCase().trim();
 
       const memberExists = await findRegularMemberByEmail(User, normalizedEmail);
-      if (memberExists) {
-        return res.status(400).json({
-          message: 'Email address already registered for a member account',
-          field: 'email',
-        });
-      }
 
       // Age restriction
       if (age < 18) {
         return res.status(400).json({ message: 'Must be 18 or older to register' });
+      }
+
+      const clientIP = getClientIP(req);
+      const detectedLocation = await detectLocation(clientIP);
+      const lifestyleData =
+        lifestyle && typeof lifestyle === 'object' && !Array.isArray(lifestyle) ? lifestyle : {};
+      const prefs = preferences && typeof preferences === 'object' ? preferences : {};
+      const profileLocation =
+        bodyLocation && typeof bodyLocation === 'object' && !Array.isArray(bodyLocation)
+          ? bodyLocation
+          : detectedLocation;
+      const profileFields = {
+        firstName,
+        lastName: lastName || '',
+        age,
+        gender,
+        location: profileLocation,
+        lifestyle: lifestyleData,
+        bio: bio || '',
+        interests: Array.isArray(interests) ? interests : [],
+        preferences: prefs,
+      };
+
+      if (memberExists) {
+        const existingProfile = await Profile.findOne({ where: { userId: memberExists.id } });
+        if (isFullyRegisteredMember(memberExists, existingProfile)) {
+          return res.status(400).json({
+            message: 'Email address already registered for a member account',
+            field: 'email',
+          });
+        }
+
+        // Resume magic-link or abandoned password signup — set password and continue wizard.
+        memberExists.password = password;
+        await memberExists.save();
+
+        let profile = await Profile.findOne({ where: { userId: memberExists.id } });
+        if (!profile) {
+          profile = await Profile.create({
+            userId: memberExists.id,
+            ...profileFields,
+            chatRegisteredAt: new Date(),
+          });
+        } else {
+          await profile.update(profileFields);
+        }
+
+        const token = generateToken(memberExists.id, memberExists.userType);
+        return res.status(200).json({
+          token,
+          resumed: true,
+          user: {
+            id: memberExists.id,
+            email: memberExists.email,
+            userType: memberExists.userType,
+          },
+          profile: {
+            firstName: profile.firstName,
+            age: profile.age,
+            location: profile.location,
+          },
+        });
       }
 
       // Frontend registration = real users only. Never trust role from client; streamers/admins are created only in CRM.
@@ -231,36 +313,23 @@ router.post(
         password,
         userType: 'regular',
         isAdminCreated: false,
-        registrationComplete: true,
+        registrationComplete: false,
       });
-
-      // Detect location from IP
-      const clientIP = getClientIP(req);
-      const location = await detectLocation(clientIP);
 
       // Create profile
       const profile = await Profile.create(
         {
           userId: user.id,
-          firstName,
-          lastName: lastName || '',
-          age,
-          gender,
-          location,
-          lifestyle: lifestyle && typeof lifestyle === 'object' && !Array.isArray(lifestyle) ? lifestyle : {},
+          ...profileFields,
           // Mark as chat ready - they'll be registered when they first open chat or when someone chats with them
-          chatRegisteredAt: new Date(), // Pre-mark as registered so they can chat immediately
+          chatRegisteredAt: new Date(),
         },
         {
           returning: true,
         }
       );
 
-      await recordCrmNewUserEvent(user, { source: 'registration', profile });
-
-      scheduleNewUserStreamerEmail(user, profile).catch((err) =>
-        console.error('scheduleNewUserStreamerEmail:', err.message)
-      );
+      // CRM + welcome streamer email fire when PUT /me/registration-complete runs after photos.
 
       // Generate token (payload includes role for role-based UI)
       const token = generateToken(user.id, user.userType);
@@ -309,9 +378,17 @@ router.post(
 
       const memberExists = await findRegularMemberByEmail(User, normalizedEmail);
       if (memberExists) {
+        const profile = await Profile.findOne({
+          where: { userId: memberExists.id },
+          attributes: ['photos', 'firstName', 'gender', 'age', 'preferences'],
+        });
+        const registrationComplete = isFullyRegisteredMember(memberExists, profile);
         return res.status(200).json({
           exists: true,
-          message: 'Email address already registered for a member account',
+          registrationComplete,
+          message: registrationComplete
+            ? 'Email address already registered for a member account'
+            : 'Account started — you can finish registration or use the login link from your email',
         });
       }
 
