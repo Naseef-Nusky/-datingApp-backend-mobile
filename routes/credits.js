@@ -5,7 +5,7 @@ import CreditTransaction from '../models/CreditTransaction.js';
 import SystemSetting from '../models/SystemSetting.js';
 import { protect } from '../middleware/auth.js';
 import { getCreditSettings, DEFAULT_REFILL_PACKS } from '../utils/creditSettings.js';
-import { checkCanStartCall } from '../utils/callAccess.js';
+import { checkCanStartCall, checkCanSendChat, checkCanSendEmail, checkCanSendMingle } from '../utils/callAccess.js';
 import { buildStripeCheckoutRedirectUrl } from '../utils/universalLinks.js';
 
 const STRIPE_PRICES_KEY = 'stripe.credit_pack_prices';
@@ -169,6 +169,45 @@ router.get('/call-access', protect, async (req, res) => {
     res.json(result);
   } catch (error) {
     console.error('Call access check error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   GET /api/credits/chat-access
+// @desc    Check if user can open/send chat (credits for at least one message)
+// @access  Private
+router.get('/chat-access', protect, async (req, res) => {
+  try {
+    const result = await checkCanSendChat(req.user.id);
+    res.json(result);
+  } catch (error) {
+    console.error('Chat access check error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   GET /api/credits/email-access
+// @desc    Check if user can send an email
+// @access  Private
+router.get('/email-access', protect, async (req, res) => {
+  try {
+    const result = await checkCanSendEmail(req.user.id);
+    res.json(result);
+  } catch (error) {
+    console.error('Email access check error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   GET /api/credits/mingle-access
+// @desc    Check if user can send a Let's Mingle message
+// @access  Private
+router.get('/mingle-access', protect, async (req, res) => {
+  try {
+    const result = await checkCanSendMingle(req.user.id);
+    res.json(result);
+  } catch (error) {
+    console.error('Mingle access check error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });

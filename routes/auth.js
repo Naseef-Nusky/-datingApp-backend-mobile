@@ -17,6 +17,7 @@ import { getSiteSettings } from '../utils/siteSettings.js';
 import { recordCrmNewUserEvent } from '../utils/crmEvents.js';
 import { scheduleNewUserStreamerEmail } from '../utils/newUserStreamerEmail.js';
 import { getFrontendUrl, getEmailFrontendUrl } from '../utils/frontendUrl.js';
+import { getCapacitorAppOrigin, isMobileClient } from '../utils/universalLinks.js';
 import {
   findCrmStaffByEmail,
   findAppDatingUserByEmail,
@@ -1080,9 +1081,75 @@ router.post(
 // --- Google OAuth ---
 // In Google Cloud Console: "Authorized JavaScript origins" = base URL only, no path, no trailing slash (e.g. http://localhost:3000).
 // "Authorized redirect URIs" = full callback URL (e.g. http://localhost:5000/api/auth/google/callback — same port as API).
+// Production mobile API: https://api.mobile.vantagedating.com/api/auth/google/callback
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
+const MOBILE_OAUTH_STATE_PREFIX = 'm_';
 const getBackendUrl = () => (process.env.BACKEND_URL || `http://localhost:${process.env.PORT || 5000}`).replace(/\/$/, '');
+
+function isMobileOAuthRequest(req) {
+  return isMobileClient(req) || req.query.platform === 'mobile';
+}
+
+function isMobileOAuthState(state) {
+  return typeof state === 'string' && state.startsWith(MOBILE_OAUTH_STATE_PREFIX);
+}
+
+function getIosAppLoginScheme() {
+  const rawScheme = process.env.IOS_APP_LOGIN_SCHEME || 'com.vantagedating.app';
+  const scheme = String(rawScheme).trim().replace(/:$/, '').replace(/^\/+/, '');
+  return /^[a-zA-Z][a-zA-Z0-9+.-]*$/.test(scheme) ? scheme : 'com.vantagedating.app';
+}
+
+function buildMobileAppDeepLink(pathAndQuery) {
+  const path = String(pathAndQuery || '').replace(/^\//, '');
+  return `${getIosAppLoginScheme()}://${path}`;
+}
+
+function evaluateNeedsProfileCompletion(user, profile) {
+  const hasPhoto = Array.isArray(profile?.photos) && profile.photos.length > 0;
+  const hasLookingFor = Boolean(profile?.preferences?.lookingFor);
+  const hasBasicProfile =
+    Boolean(profile?.firstName) &&
+    Boolean(profile?.gender) &&
+    Number(profile?.age || 0) >= 18;
+  const profileLooksIncomplete = !profile || !hasBasicProfile || !hasLookingFor || !hasPhoto;
+  return user.registrationComplete === false || profileLooksIncomplete;
+}
+
+async function finalizeGoogleUserSession(user, firstName) {
+  await ensureVerificationStateForUser(user);
+
+  if (user.userType !== 'regular') {
+    return {
+      ok: false,
+      message: isCrmSystemUser(user.userType)
+        ? frontendLoginForbiddenMessage
+        : 'Use the correct login for your account type.',
+    };
+  }
+
+  user.lastLogin = new Date();
+  await user.save();
+
+  let profile = await Profile.findOne({ where: { userId: user.id } });
+  if (profile) {
+    const wasOnline = !!profile.isOnline;
+    profile.isOnline = true;
+    profile.lastSeen = new Date();
+    if (firstName && !profile.firstName) {
+      profile.firstName = firstName.charAt(0).toUpperCase() + firstName.slice(1).toLowerCase();
+    }
+    await profile.save();
+    if (!wasOnline) {
+      notifyContactsWhenUserComesOnline(user, profile);
+    }
+  }
+
+  const needsProfileCompletion = evaluateNeedsProfileCompletion(user, profile);
+  const token = generateToken(user.id, user.userType);
+  return { ok: true, token, needsProfileCompletion };
+}
 
 // @route   GET /api/auth/google
 // @desc    Redirect to Google OAuth consent screen
@@ -1096,7 +1163,8 @@ router.get('/google', (req, res) => {
   const backendUrl = getBackendUrl();
   const redirectUri = `${backendUrl}/api/auth/google/callback`;
   const scope = 'email profile';
-  const state = crypto.randomBytes(16).toString('hex');
+  const stateBase = crypto.randomBytes(16).toString('hex');
+  const state = isMobileOAuthRequest(req) ? `${MOBILE_OAUTH_STATE_PREFIX}${stateBase}` : stateBase;
   const url = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(GOOGLE_CLIENT_ID)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=code&scope=${encodeURIComponent(scope)}&state=${state}&access_type=offline&prompt=consent`;
   res.redirect(url);
 });
@@ -1105,8 +1173,15 @@ router.get('/google', (req, res) => {
 // @desc    Handle Google OAuth callback: exchange code for user, create/find user, redirect to frontend with token
 // @access  Public
 router.get('/google/callback', async (req, res) => {
-  const frontendUrl = getFrontendUrl(req);
-  const errorRedirect = (msg) => res.redirect(`${frontendUrl}/?error=${encodeURIComponent(msg)}`);
+  const mobileOAuth = isMobileOAuthState(req.query.state);
+  const frontendUrl = mobileOAuth ? getCapacitorAppOrigin() : getFrontendUrl(req);
+  const errorRedirect = (msg) => {
+    if (mobileOAuth) {
+      const params = new URLSearchParams({ error: msg });
+      return res.redirect(buildMobileAppDeepLink(`auth/google-callback?${params.toString()}`));
+    }
+    return res.redirect(`${frontendUrl}/?error=${encodeURIComponent(msg)}`);
+  };
 
   if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET) {
     return errorRedirect('Google sign-in is not configured');
@@ -1185,7 +1260,20 @@ router.get('/google/callback', async (req, res) => {
       user.profile = { firstName: firstName.charAt(0).toUpperCase() + firstName.slice(1).toLowerCase() };
     }
 
-    // Send login link email (same flow as magic link): user must click link in email to sign in
+    // Native mobile app: sign in immediately (same as Apple) and deep-link back into the app.
+    if (mobileOAuth) {
+      const session = await finalizeGoogleUserSession(user, firstName);
+      if (!session.ok) {
+        return errorRedirect(session.message);
+      }
+      const params = new URLSearchParams({ token: session.token });
+      if (session.needsProfileCompletion) {
+        params.set('openCompleteProfile', '1');
+      }
+      return res.redirect(buildMobileAppDeepLink(`auth/google-callback?${params.toString()}`));
+    }
+
+    // Web: send login link email (same flow as magic link): user must click link in email to sign in
     const rawToken = crypto.randomBytes(32).toString('hex');
     const hashedToken = crypto.createHash('sha256').update(rawToken).digest('hex');
     await User.update(

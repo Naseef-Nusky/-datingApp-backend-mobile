@@ -51,6 +51,7 @@ import wishlistRoutes from './routes/wishlist.js';
 import settingsRoutes from './routes/settings.js';
 import vipRoutes from './routes/vip.js';
 import translateRoutes from './routes/translate.js';
+import compatibilityRoutes from './routes/compatibility.js';
 import createMobileApiRouter from './routes/mobile/index.js';
 
 dotenv.config();
@@ -251,6 +252,7 @@ app.use('/api/wishlist', wishlistRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/vip', vipRoutes);
 app.use('/api/translate', translateRoutes);
+app.use('/api/compatibility', compatibilityRoutes);
 app.use('/api/mobile', createMobileApiRouter(io));
 
 // Socket.IO for real-time features (video/voice calls, live messaging)

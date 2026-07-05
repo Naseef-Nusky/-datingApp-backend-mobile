@@ -31,6 +31,7 @@ import {
   Story,
   CreditTransaction,
   Block,
+  Compatibility,
 } from '../models/index.js';
 import { protect, admin, superadmin, notCrmStreamerStaff } from '../middleware/auth.js';
 import {
@@ -163,6 +164,10 @@ const purgeUserRelatedRecords = async (userId, transaction = null) => {
   await CrmEvent.destroy({ where: { userId }, ...opts });
   await NewUserStreamerEmail.destroy({
     where: { [Op.or]: [{ newUserId: userId }, { streamerUserId: userId }] },
+    ...opts,
+  });
+  await Compatibility.destroy({
+    where: { [Op.or]: [{ userLowId: userId }, { userHighId: userId }] },
     ...opts,
   });
   await Profile.destroy({ where: { userId }, ...opts });

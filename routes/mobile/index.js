@@ -15,6 +15,7 @@ import wishlistRoutes from '../wishlist.js';
 import settingsRoutes from '../settings.js';
 import vipRoutes from '../vip.js';
 import translateRoutes from '../translate.js';
+import compatibilityRoutes from '../compatibility.js';
 import stripeReturnRoutes from './stripeReturn.js';
 
 /**
@@ -63,6 +64,7 @@ export default function createMobileApiRouter(io) {
   router.use('/settings', settingsRoutes);
   router.use('/vip', vipRoutes);
   router.use('/translate', translateRoutes);
+  router.use('/compatibility', compatibilityRoutes);
 
   return router;
 }
